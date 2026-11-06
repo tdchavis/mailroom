@@ -221,18 +221,22 @@ class Gmail:
     def list_filters(self) -> list[dict]:
         return self._call("GET", "/settings/filters").get("filter", [])
 
-    def create_filter(self, from_addr: str, label_name: str | None = None, skip_inbox: bool = True,
-                      mark_read: bool = False) -> str:
+    def create_filter(self, from_addr: str | None = None, label_name: str | None = None, skip_inbox: bool = True,
+                      mark_read: bool = False, query: str | None = None) -> str:
+        """Filter on a sender (`from_addr`) or any Gmail search (`query`). Label and/or skip inbox only."""
         add = [self.ensure_label(label_name)] if label_name else []
         remove = (["INBOX"] if skip_inbox else []) + (["UNREAD"] if mark_read else [])
         if not add and not remove:
             raise ValueError("a filter needs a label or skip-inbox")
+        criteria = {"from": from_addr} if from_addr else {"query": query}
+        if not (from_addr or query):
+            raise ValueError("a filter needs --from or --query")
         for f in self.list_filters():   # don't create the same filter twice
-            if f.get("criteria", {}).get("from", "").lower() == from_addr.lower() and \
+            if {k: v.lower() for k, v in f.get("criteria", {}).items()} == {k: v.lower() for k, v in criteria.items()} and \
                set(f.get("action", {}).get("addLabelIds", [])) == set(add) and \
                set(f.get("action", {}).get("removeLabelIds", [])) == set(remove):
                 return f["id"]
-        body = {"criteria": {"from": from_addr}, "action": {"addLabelIds": add, "removeLabelIds": remove}}
+        body = {"criteria": criteria, "action": {"addLabelIds": add, "removeLabelIds": remove}}
         return self._call("POST", "/settings/filters", json=body)["id"]
 
     # ---- drafts (never sent) ----

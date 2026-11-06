@@ -13,12 +13,12 @@
                                               list mailing-list senders; --go unsubscribes via their own links
     mailroom send-self <account> --subject S (--body TEXT | --body-file F)   email yourself (nobody else)
     mailroom send-self <account> --draft ID   send a draft that is addressed only to you
-    mailroom receipts [<account>|all] [--days 30] [--store Walmart] [--find "$49.99"] [--backfill]
-                                              receipts grouped by store with totals; --backfill labels
-                                              older receipts it can recognise
+    mailroom receipts [<account>|all] [--days 30] [--store Walmart] [--find "$49.99"] [--backfill] [--email personal]
+                                              one list of every receipt in every inbox, with links;
+                                              --email sends it to you; --backfill labels older receipts
     mailroom archive-all <account> [--older-than 1m] [--query Q] [--go]
                                               bulk-archive the inbox (dry run unless --go)
-    mailroom filter <account> --from ADDR --label NAME [--keep-in-inbox] [--apply]
+    mailroom filter <account> (--from ADDR | --query Q) --label NAME [--keep-in-inbox] [--apply]
                                               new mail from ADDR gets the label and skips the inbox;
                                               --apply also files what's already there
 
@@ -261,17 +261,23 @@ def cmd_receipts(a):
             q += f" label:receipts-{a.store.lower().replace(' ', '-')}"
         for m in g.search(q, a.max):
             rows.setdefault(store_of(m.sender) or "Other", []).append((acct, m))
-    total = 0
+    lines, total = [], 0
     for store in [*STORES, "Other"]:
         if store not in rows:
             continue
-        amts = [amount_in(m.subject + " " + m.snippet) for _, m in rows[store]]
-        known = sum(float(x[1:].replace(",", "")) for x in amts if x)
-        print(f"\n== {store}: {len(rows[store])} receipt(s), about ${known:,.2f} ==")
-        for (acct, m), amt in zip(rows[store], amts):
-            print(f"[{alias(acct)}] {m.date[5:16]:12} {amt:>10}  {m.sender[:30]:30}  {m.subject[:58]}  ({m.id})")
+        lines.append(f"\n== {store}: {len(rows[store])} ==")
+        for acct, m in rows[store]:
+            amt = amount_in(m.subject + " " + m.snippet)
+            link = f"https://mail.google.com/mail/u/?authuser={acct}#all/{m.thread_id}"
+            lines.append(f"{m.date[5:16]:12} {amt:>9}  {m.sender.split('<')[0].strip()[:28]:28}  {m.subject[:56]}  [{alias(acct)}]\n    {link}")
         total += len(rows[store])
-    print(f"\n{total} receipt(s). In Gmail: label:receipts, or label:receipts-walmart, label:receipts-amazon, ...")
+    text = "\n".join(lines) + f"\n\n{total} receipt(s) in the last {a.days} day(s). In Gmail: label:receipts (or label:receipts-walmart, ...)."
+    if a.email:
+        to = resolve(a.email)[0]
+        mid = Gmail(creds, to).send_to_self(f"Receipts · last {a.days} days ({total})", text)
+        print(f"Emailed the receipts index to {to} (message {mid}).")
+    else:
+        print(text)
 
 
 def cmd_archive_all(a):
@@ -288,11 +294,14 @@ def cmd_archive_all(a):
 
 def cmd_filter(a):
     g = Gmail(load_credentials(), resolve(a.account)[0])
-    fid = g.create_filter(a.from_addr, a.label, skip_inbox=not a.keep_in_inbox)
+    if not (a.from_addr or a.query):
+        sys.exit("Need --from ADDR or --query \"gmail search\".")
+    fid = g.create_filter(a.from_addr, a.label, skip_inbox=not a.keep_in_inbox, query=a.query)
     where = "label '" + a.label + "'" + ("" if a.keep_in_inbox else ", skipping the inbox")
-    print(f"[{alias(g.email)}] Filter {fid}: mail from {a.from_addr} -> {where}.")
+    what = f"mail from {a.from_addr}" if a.from_addr else f"mail matching \"{a.query}\""
+    print(f"[{alias(g.email)}] Filter {fid}: {what} -> {where}.")
     if a.apply:
-        ids = g.list_ids(f"from:{a.from_addr}")
+        ids = g.list_ids(f"from:{a.from_addr}" if a.from_addr else a.query)
         n = g.batch_modify(ids, add=[g.ensure_label(a.label)], remove=[] if a.keep_in_inbox else ["INBOX"])
         print(f"  Filed {n} existing message(s) the same way.")
 
@@ -332,13 +341,15 @@ def main(argv=None):
     s.add_argument("--store", help="Walmart, Amazon, \"Old Navy\", Nike")
     s.add_argument("-n", "--max", type=int, default=100)
     s.add_argument("--backfill", action="store_true", help="label older receipts it can recognise")
+    s.add_argument("--email", metavar="ACCOUNT", help="email the index to this inbox's owner instead of printing")
     s.set_defaults(fn=cmd_receipts)
     s = sub.add_parser("archive-all", help="bulk-archive the inbox (dry run unless --go)")
     s.add_argument("account"); s.add_argument("--older-than", help="e.g. 1m, 30d, 1y (Gmail syntax)")
     s.add_argument("--query", help="a full Gmail query instead of in:inbox")
     s.add_argument("--go", action="store_true"); s.set_defaults(fn=cmd_archive_all)
     s = sub.add_parser("filter", help="label (and skip inbox for) mail from a sender")
-    s.add_argument("account"); s.add_argument("--from", dest="from_addr", required=True)
+    s.add_argument("account"); s.add_argument("--from", dest="from_addr")
+    s.add_argument("--query", help="any Gmail search instead of a sender, e.g. '(cleaning OR janitorial) (quote OR bid)'")
     s.add_argument("--label", required=True); s.add_argument("--keep-in-inbox", action="store_true")
     s.add_argument("--apply", action="store_true", help="also file mail already in the mailbox")
     s.set_defaults(fn=cmd_filter)
