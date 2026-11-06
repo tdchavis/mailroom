@@ -67,6 +67,8 @@ class Message:
     body: str = ""
     message_id_header: str = ""
     attachments: list[Attachment] = field(default_factory=list)
+    list_unsubscribe: str = ""        # the sender's official unsubscribe links, if any
+    list_unsubscribe_post: str = ""   # "List-Unsubscribe=One-Click" when one-click is supported
 
 
 class Gmail:
@@ -83,8 +85,9 @@ class Gmail:
             tok = access_token(self.creds, self.email, self.session)
             r = self.session.request(method, API + path, params=params, json=json,
                                      headers={"Authorization": f"Bearer {tok}"}, timeout=60)
-            if r.status_code in (429, 500, 502, 503) and attempt < 3:
-                time.sleep(2 ** attempt)
+            quota = r.status_code == 403 and "Quota exceeded" in r.text
+            if (r.status_code in (429, 500, 502, 503) or quota) and attempt < 3:
+                time.sleep(20 if quota else 2 ** attempt)   # Gmail's limit is per minute; wait it out
                 continue
             if r.status_code >= 400:
                 raise RuntimeError(f"Gmail error {r.status_code} on {path}: {r.text[:300]}")
@@ -107,7 +110,8 @@ class Gmail:
 
     def get_message(self, message_id: str, body: bool = True) -> Message:
         d = self._call("GET", f"/messages/{message_id}", params={"format": "full" if body else "metadata",
-                       **({} if body else {"metadataHeaders": ["From", "To", "Cc", "Subject", "Date", "Message-ID"]})})
+                       **({} if body else {"metadataHeaders": ["From", "To", "Cc", "Subject", "Date", "Message-ID",
+                                                                "List-Unsubscribe", "List-Unsubscribe-Post"]})})
         return parse_message(d)
 
     def get_thread(self, thread_id: str) -> list[Message]:
@@ -204,6 +208,8 @@ def parse_message(d: dict) -> Message:
         subject=headers.get("subject", "(no subject)"), snippet=html.unescape(d.get("snippet", "")),
         labels=d.get("labelIds", []), body=body, message_id_header=headers.get("message-id", ""),
         attachments=atts,
+        list_unsubscribe=headers.get("list-unsubscribe", ""),
+        list_unsubscribe_post=headers.get("list-unsubscribe-post", ""),
     )
 
 

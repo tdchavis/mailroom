@@ -9,6 +9,8 @@
     mailroom archive <account> <thread-id>...
     mailroom draft <account> --to ADDR --subject S (--body TEXT | --body-file F) [--reply-to MSG-ID]
     mailroom export-env                       write the cloud key line to .secrets/cloud-env.txt
+    mailroom unsubscribe <account> [--days 90] [--keep "Name"]... [--go]
+                                              list mailing-list senders; --go unsubscribes via their own links
 
 It never sends and never deletes. `search` uses normal Gmail search words
 (from:, subject:, has:attachment, filename:pdf, after:2026/10/01, in:anywhere, ...).
@@ -173,6 +175,45 @@ def cmd_export_env(_):
           "environment variables. The file stays in .secrets/, which is never uploaded to GitHub.")
 
 
+def cmd_unsubscribe(a):
+    from .unsubscribe import is_kept, perform, scan
+    g = Gmail(load_credentials(), resolve(a.account)[0])
+    senders = scan(g, a.days)
+    keep = a.keep or []
+    todo, kept, mail_only = [], [], []
+    for s in senders:
+        if is_kept(s, keep):
+            kept.append(s)
+        elif s.can_unsubscribe:
+            todo.append(s)
+        else:
+            mail_only.append(s)
+    print(f"[{alias(g.email)}] {len(senders)} mailing-list sender(s) in the last {a.days} days.\n")
+    if kept:
+        print("KEEPING (on your keep list):")
+        for s in kept:
+            print(f"  {s.name} <{s.email}>  ({s.count})")
+        print()
+    print(f"{'UNSUBSCRIBING' if a.go else 'WOULD UNSUBSCRIBE'} ({len(todo)}):")
+    log = secrets_dir() / "unsubscribe-log.txt"
+    for s in todo:
+        line = f"  {s.name} <{s.email}>  ({s.count}, e.g. \"{s.latest_subject[:60]}\")"
+        if a.go:
+            result = perform(s)
+            line += f"  -> {result}"
+            with open(log, "a") as f:
+                f.write(f"{g.email}\t{s.email}\t{result}\n")
+        print(line)
+    if mail_only:
+        print(f"\nCAN'T (their only unsubscribe is by sending an email; mailroom never sends) ({len(mail_only)}):")
+        for s in mail_only:
+            print(f"  {s.name} <{s.email}>  ({s.count})")
+    if not a.go:
+        print("\nDry run. Add --go to do it. Nothing was changed.")
+    else:
+        print(f"\nDone. Log: {log}. Mail already in the inbox is untouched.")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mailroom", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -194,6 +235,10 @@ def main(argv=None):
     s = sub.add_parser("draft"); s.add_argument("account"); s.add_argument("--to"); s.add_argument("--subject")
     s.add_argument("--body"); s.add_argument("--body-file"); s.add_argument("--reply-to"); s.set_defaults(fn=cmd_draft)
     sub.add_parser("export-env").set_defaults(fn=cmd_export_env)
+    s = sub.add_parser("unsubscribe"); s.add_argument("account"); s.add_argument("--days", type=int, default=90)
+    s.add_argument("--keep", action="append", help="sender name or address to keep (repeatable)")
+    s.add_argument("--go", action="store_true", help="actually unsubscribe; without it, just list")
+    s.set_defaults(fn=cmd_unsubscribe)
     a = p.parse_args(argv)
     try:
         a.fn(a)

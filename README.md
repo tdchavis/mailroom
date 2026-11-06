@@ -21,3 +21,5 @@ Accounts are named in an `accounts.json` next to where you run it (`{"work": "yo
 Keys come from your own Google Cloud OAuth client: `.secrets/client.json` plus `mailroom login <account>`,
 or, in the cloud, the `MAILROOM_CREDENTIALS` environment variable (`mailroom export-env` writes it).
 Never commit `.secrets/`.
+
+`mailroom unsubscribe <account> [--days 90] [--keep "Name"]... [--go]` lists mailing-list senders (those with a List-Unsubscribe header) and, with `--go`, unsubscribes through their own https link or one-click endpoint. Senders whose only unsubscribe is by email are reported and left alone, since mailroom never sends.

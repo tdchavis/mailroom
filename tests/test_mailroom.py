@@ -136,3 +136,51 @@ def test_pdf_text_extracted():
 
 def test_bad_pdf_reported_not_crashed():
     assert pdf_text(b"not a pdf").startswith("[Could not open")
+
+
+# ---------- unsubscribe ----------
+from mailroom.gmail import Message
+from mailroom.unsubscribe import ListSender, is_kept, parse_list_unsubscribe, perform, scan
+
+
+def test_parse_list_unsubscribe_header():
+    https, mailto = parse_list_unsubscribe("<mailto:unsub@news.example.com?subject=x>, <https://news.example.com/u/123>")
+    assert https == ["https://news.example.com/u/123"] and mailto == ["unsub@news.example.com"]
+    assert parse_list_unsubscribe("<http://insecure.example.com/u>") == ([], [])  # http (not https) is ignored
+
+
+def test_keep_list_matches_name_or_address():
+    s = ListSender(email="news@example-author.com", name="Example Author")
+    assert is_kept(s, ["example author"]) and is_kept(s, ["Example-Author.com"]) and not is_kept(s, ["Lipscomb"])
+
+
+def test_scan_groups_by_sender_and_skips_mail_without_header():
+    msgs = [
+        Message(id="1", thread_id="t1", date="", sender="Deals <deals@shop.com>", to="", cc="", subject="50% off",
+                snippet="", labels=[], list_unsubscribe="<https://shop.com/u/1>", list_unsubscribe_post="List-Unsubscribe=One-Click"),
+        Message(id="2", thread_id="t2", date="", sender="Deals <deals@shop.com>", to="", cc="", subject="Sale",
+                snippet="", labels=[], list_unsubscribe="<https://shop.com/u/1>"),
+        Message(id="3", thread_id="t3", date="", sender="Bank <alerts@bank.com>", to="", cc="", subject="NSF", snippet="", labels=[]),
+        Message(id="4", thread_id="t4", date="", sender="Old List <x@old.org>", to="", cc="", subject="Hi",
+                snippet="", labels=[], list_unsubscribe="<mailto:leave@old.org>"),
+    ]
+    class G:
+        def search(self, q, max_results): return msgs
+    out = scan(G(), 30)
+    assert [s.email for s in out] == ["deals@shop.com", "x@old.org"]
+    assert out[0].count == 2 and out[0].one_click and out[0].can_unsubscribe
+    assert not out[1].can_unsubscribe and out[1].mailto_links == ["leave@old.org"]
+
+
+def test_perform_one_click_posts_and_mailto_only_is_skipped():
+    calls = []
+    class S:
+        def post(self, url, data=None, **k): calls.append(("POST", url, data)); return FakeResp({}, 200)
+        def get(self, url, **k): calls.append(("GET", url, None)); return FakeResp({}, 200)
+    s = ListSender(email="d@shop.com", name="Deals", https_links=["https://shop.com/u/1"], one_click=True)
+    assert perform(s, S(), pause=0).startswith("done")
+    assert calls == [("POST", "https://shop.com/u/1", "List-Unsubscribe=One-Click")]
+    plain = ListSender(email="p@x.com", name="P", https_links=["https://x.com/u"])
+    assert perform(plain, S(), pause=0).startswith("done") and calls[-1][0] == "GET"
+    only_mail = ListSender(email="m@x.com", name="M", mailto_links=["leave@x.com"])
+    assert perform(only_mail, S(), pause=0).startswith("skipped") and len(calls) == 2
