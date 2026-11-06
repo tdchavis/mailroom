@@ -1,4 +1,5 @@
 import base64, json
+from email.message import EmailMessage
 import pytest
 
 from mailroom import auth
@@ -12,7 +13,7 @@ def b64(s): return base64.urlsafe_b64encode(s.encode() if isinstance(s, str) els
 
 # ---------- safety: no send, no delete ----------
 @pytest.mark.parametrize("method,path", [
-    ("POST", "/messages/send"), ("POST", "/drafts/send"), ("DELETE", "/messages/abc"),
+    ("DELETE", "/messages/abc"),
     ("POST", "/messages/abc/trash"), ("POST", "/threads/abc/trash"), ("DELETE", "/threads/abc"),
     ("POST", "/messages/batchDelete"), ("PUT", "/settings/autoForwarding"), ("POST", "/settings/filters"),
     ("POST", "/messages/import"), ("POST", "/messages"),
@@ -48,9 +49,15 @@ def creds():
     return Credentials("cid", "secret", {"me@x.com": "RT"})
 
 
-def test_gmail_refuses_send_even_if_code_tries():
+def test_gmail_refuses_send_to_anyone_else_even_if_code_tries():
     g = Gmail(creds(), "me@x.com", FakeSession())
+    msg = EmailMessage(); msg["To"] = "friend@y.com"; msg["Subject"] = "hi"; msg.set_content("x")
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     with pytest.raises(Forbidden):
+        g._call("POST", "/messages/send", json={"raw": raw})
+    with pytest.raises(Forbidden):          # unchecked draft id
+        g._call("POST", "/drafts/send", json={"id": "D9"})
+    with pytest.raises(Forbidden):          # no recipient at all
         g._call("POST", "/messages/send", json={})
 
 
@@ -184,3 +191,42 @@ def test_perform_one_click_posts_and_mailto_only_is_skipped():
     assert perform(plain, S(), pause=0).startswith("done") and calls[-1][0] == "GET"
     only_mail = ListSender(email="m@x.com", name="M", mailto_links=["leave@x.com"])
     assert perform(only_mail, S(), pause=0).startswith("skipped") and len(calls) == 2
+
+
+# ---------- send-to-self: the only sending allowed ----------
+class DraftSession(FakeSession):
+    def __init__(self, to): super().__init__(); self.to = to
+    def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+        self.calls.append((method, url, json))
+        if "/drafts/D1" in url:
+            return FakeResp({"message": {"payload": {"headers": [{"name": "To", "value": self.to}]}}})
+        return FakeResp({"id": "sent1"})
+
+
+def test_send_to_self_posts_to_send_with_only_me():
+    s = FakeSession(); g = Gmail(creds(), "me@x.com", s)
+    assert g.send_to_self("Bri · Fri", "hello") == "x"
+    method, url, body = s.calls[-1]
+    assert method == "POST" and url.endswith("/messages/send")
+    raw = base64.urlsafe_b64decode(body["raw"] + "==").decode()
+    assert "To: me@x.com" in raw and "Subject: Bri" in raw
+
+
+def test_send_draft_refuses_other_recipients():
+    g = Gmail(creds(), "me@x.com", DraftSession("Lawyer <law@firm.com>, me@x.com"))
+    with pytest.raises(Forbidden):
+        g.send_draft_to_self("D1")
+
+
+def test_send_draft_to_self_only():
+    s = DraftSession("Travis <me@x.com>"); g = Gmail(creds(), "me@x.com", s)
+    assert g.send_draft_to_self("D1") == "sent1"
+    assert s.calls[-1][0:2] == ("POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send")
+
+
+def test_assert_only_me_blocks_everyone_else():
+    g = Gmail(creds(), "me@x.com", FakeSession())
+    with pytest.raises(Forbidden):
+        g._assert_only_me(["me@x.com", "friend@y.com"])
+    with pytest.raises(Forbidden):
+        g._assert_only_me([])

@@ -11,8 +11,10 @@
     mailroom export-env                       write the cloud key line to .secrets/cloud-env.txt
     mailroom unsubscribe <account> [--days 90] [--keep "Name"]... [--go]
                                               list mailing-list senders; --go unsubscribes via their own links
+    mailroom send-self <account> --subject S (--body TEXT | --body-file F)   email yourself (nobody else)
+    mailroom send-self <account> --draft ID   send a draft that is addressed only to you
 
-It never sends and never deletes. `search` uses normal Gmail search words
+It never deletes, and the only address it can send to is the mailbox's own. `search` uses normal Gmail search words
 (from:, subject:, has:attachment, filename:pdf, after:2026/10/01, in:anywhere, ...).
 """
 
@@ -214,6 +216,23 @@ def cmd_unsubscribe(a):
         print(f"\nDone. Log: {log}. Mail already in the inbox is untouched.")
 
 
+def cmd_send_self(a):
+    g = Gmail(load_credentials(), resolve(a.account)[0])
+    if a.list_drafts:
+        for did, subj in g.list_drafts():
+            print(f"{did}  {subj}")
+        return
+    if a.draft:
+        mid = g.send_draft_to_self(a.draft)
+        print(f"Sent draft {a.draft} to {g.email} (message {mid}).")
+        return
+    body = Path(a.body_file).read_text() if a.body_file else (a.body or "")
+    if not a.subject or not body:
+        sys.exit("Need --subject and --body/--body-file (or --draft ID, or --list-drafts).")
+    mid = g.send_to_self(a.subject, body)
+    print(f"Emailed {g.email}: \"{a.subject}\" (message {mid}).")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mailroom", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -239,6 +258,10 @@ def main(argv=None):
     s.add_argument("--keep", action="append", help="sender name or address to keep (repeatable)")
     s.add_argument("--go", action="store_true", help="actually unsubscribe; without it, just list")
     s.set_defaults(fn=cmd_unsubscribe)
+    s = sub.add_parser("send-self", help="email the mailbox owner (and nobody else)")
+    s.add_argument("account"); s.add_argument("--subject"); s.add_argument("--body"); s.add_argument("--body-file")
+    s.add_argument("--draft", help="send an existing draft that is addressed only to yourself")
+    s.add_argument("--list-drafts", action="store_true"); s.set_defaults(fn=cmd_send_self)
     a = p.parse_args(argv)
     try:
         a.fn(a)

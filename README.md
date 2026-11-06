@@ -2,7 +2,7 @@
 
 A small command-line tool that lets an AI assistant work through Gmail **without being able to send or delete anything**.
 
-It can search, read messages and threads, pull the text out of PDF attachments, add labels, archive, and save drafts.
+It can search, read messages and threads, pull the text out of PDF attachments, add labels, archive, save drafts, and email the mailbox owner (`send-self`, which refuses any other recipient).
 Every request to Google passes one checkpoint (`ALLOWED` in `mailroom/gmail.py`) that lists only those actions;
 send, delete, trash, forwarding, and filter changes are refused, and the tests check that.
 

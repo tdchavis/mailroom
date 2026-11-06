@@ -1,8 +1,9 @@
 """A small Gmail client that can only read, label, archive, and draft.
 
 Safety: every request goes through `_call`, which checks it against ALLOWED below.
-There is no send, no delete, no trash, no forwarding or filter changes. If a future
-edit tries to add one, `_call` refuses it and the tests fail.
+There is no delete, no trash, no forwarding or filter changes. The only sending allowed is
+a note to the mailbox owner's own address (send_to_self / send_draft_to_self), and both
+refuse any other recipient. If a future edit tries to widen that, the tests fail.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from email.message import EmailMessage
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 
 import requests
 
@@ -34,6 +35,10 @@ ALLOWED = [
     ("POST", r"/threads/[\w-]+/modify"),       # add/remove labels; archive = remove INBOX
     ("POST", r"/messages/[\w-]+/modify"),
     ("POST", r"/drafts"),                      # create a draft (never sent)
+    ("GET", r"/drafts"),
+    ("GET", r"/drafts/[\w-]+"),
+    ("POST", r"/messages/send"),               # ONLY to the mailbox owner; enforced in send_to_self
+    ("POST", r"/drafts/send"),                 # ONLY drafts addressed to the owner; enforced in send_draft_to_self
 ]
 
 
@@ -76,11 +81,17 @@ class Gmail:
         self.creds = creds
         self.email = email.lower()
         self.session = session or requests.Session()
+        self._drafts_verified_mine: set[str] = set()
 
     # ---- the one door to Google ----
     def _call(self, method: str, path: str, params=None, json=None):
         if not is_allowed(method, path):
             raise Forbidden(f"mailroom does not allow {method} {path}")
+        if method == "POST" and path == "/messages/send":
+            self._assert_only_me(recipients_of_raw((json or {}).get("raw", "")))
+        if method == "POST" and path == "/drafts/send":
+            if (json or {}).get("id") not in self._drafts_verified_mine:
+                raise Forbidden("mailroom only sends drafts it has checked are addressed to the owner")
         for attempt in range(4):
             tok = access_token(self.creds, self.email, self.session)
             r = self.session.request(method, API + path, params=params, json=json,
@@ -162,6 +173,42 @@ class Gmail:
             payload["message"]["threadId"] = reply_to.thread_id
         return self._call("POST", "/drafts", json=payload)["id"]
 
+    # ---- the one kind of sending allowed: a note to yourself ----
+    def _assert_only_me(self, addrs: list[str]):
+        """Refuse unless every recipient is this mailbox's own address."""
+        others = [a for a in addrs if a.lower() != self.email]
+        if others or not addrs:
+            raise Forbidden(f"mailroom only sends to the mailbox owner ({self.email}); refused: {others or 'no recipient'}")
+
+    def send_to_self(self, subject: str, body: str) -> str:
+        self._assert_only_me([self.email])
+        msg = EmailMessage()
+        msg["To"] = self.email
+        msg["From"] = self.email
+        msg["Subject"] = subject
+        msg.set_content(body)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        return self._call("POST", "/messages/send", json={"raw": raw})["id"]
+
+    def list_drafts(self, max_results: int = 50) -> list[tuple[str, str]]:
+        """[(draft_id, subject)] newest first."""
+        d = self._call("GET", "/drafts", params={"maxResults": max_results})
+        out = []
+        for dr in d.get("drafts", []):
+            m = self._call("GET", f"/drafts/{dr['id']}", params={"format": "metadata", "metadataHeaders": ["Subject", "To", "Cc", "Bcc"]})
+            h = {x["name"].lower(): x["value"] for x in m.get("message", {}).get("payload", {}).get("headers", [])}
+            out.append((dr["id"], h.get("subject", "(no subject)")))
+        return out
+
+    def send_draft_to_self(self, draft_id: str) -> str:
+        """Send an existing draft, but only if it is addressed solely to this mailbox."""
+        m = self._call("GET", f"/drafts/{draft_id}", params={"format": "metadata", "metadataHeaders": ["To", "Cc", "Bcc"]})
+        headers = {x["name"].lower(): x["value"] for x in m.get("message", {}).get("payload", {}).get("headers", [])}
+        recipients = [a for _, a in getaddresses([h for h in (headers.get("to"), headers.get("cc"), headers.get("bcc")) if h]) if a]
+        self._assert_only_me(recipients)
+        self._drafts_verified_mine.add(draft_id)
+        return self._call("POST", "/drafts/send", json={"id": draft_id})["id"]
+
 
 # ---------- parsing helpers (pure functions; tested) ----------
 
@@ -211,6 +258,16 @@ def parse_message(d: dict) -> Message:
         list_unsubscribe=headers.get("list-unsubscribe", ""),
         list_unsubscribe_post=headers.get("list-unsubscribe-post", ""),
     )
+
+
+def recipients_of_raw(raw_b64: str) -> list[str]:
+    """All To/Cc/Bcc addresses in a base64url MIME message."""
+    from email import message_from_bytes
+    try:
+        msg = message_from_bytes(b64decode(raw_b64))
+    except Exception:  # noqa: BLE001
+        return []
+    return [a for _, a in getaddresses([h for h in (msg.get("To"), msg.get("Cc"), msg.get("Bcc")) if h]) if a]
 
 
 def sender_email(m: Message) -> str:
