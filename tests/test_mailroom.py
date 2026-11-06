@@ -105,9 +105,9 @@ def test_html_only_body_becomes_text():
 # ---------- keys ----------
 def test_cloud_env_keys(monkeypatch):
     monkeypatch.setenv("MAILROOM_CREDENTIALS", json.dumps(
-        {"client_id": "c", "client_secret": "s", "tokens": {"Travis@Capacity.church": "r"}}))
+        {"client_id": "c", "client_secret": "s", "tokens": {"Me@Example.com": "r"}}))
     c = load_credentials()
-    assert c.source == "env" and c.tokens == {"travis@capacity.church": "r"}
+    assert c.source == "env" and c.tokens == {"me@example.com": "r"}
 
 
 def test_revoked_key_gives_plain_message():
@@ -157,8 +157,8 @@ def test_parse_list_unsubscribe_header():
 
 
 def test_keep_list_matches_name_or_address():
-    s = ListSender(email="news@dhariusdaniels.com", name="Dharius Daniels")
-    assert is_kept(s, ["dharius daniels"]) and is_kept(s, ["DhariusDaniels.com"]) and not is_kept(s, ["Lipscomb"])
+    s = ListSender(email="news@keepme.example", name="Keep Me Weekly")
+    assert is_kept(s, ["keep me weekly"]) and is_kept(s, ["KeepMe.example"]) and not is_kept(s, ["Other"])
 
 
 def test_scan_groups_by_sender_and_skips_mail_without_header():

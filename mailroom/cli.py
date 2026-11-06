@@ -1,7 +1,7 @@
 """mailroom: Bri's hands in your inboxes.
 
     mailroom accounts                         which inboxes are connected
-    mailroom login church|personal|chavis|all sign in once per inbox (opens a browser)
+    mailroom login <account>|all           sign in once per inbox (opens a browser)
     mailroom search "query" [-a church] [-n 20]
     mailroom read  <account> <message-or-thread-id> [--thread]
     mailroom pdf   <account> <message-id> [--save DIR]
