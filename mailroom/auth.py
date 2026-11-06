@@ -26,7 +26,9 @@ from pathlib import Path
 
 import requests
 
-SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+# gmail.modify = read/label/archive/draft; gmail.settings.basic = create label+skip-inbox filters.
+# (Filters need a fresh `mailroom login <acct>` for inboxes signed in before this was added.)
+SCOPE = "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.settings.basic"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 ENV_VAR = "MAILROOM_CREDENTIALS"

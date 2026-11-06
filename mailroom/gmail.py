@@ -1,9 +1,12 @@
-"""A small Gmail client that can only read, label, archive, and draft.
+"""A small Gmail client that can only read, label, archive, filter, and draft.
 
 Safety: every request goes through `_call`, which checks it against ALLOWED below.
-There is no delete, no trash, no forwarding or filter changes. The only sending allowed is
-a note to the mailbox owner's own address (send_to_self / send_draft_to_self), and both
-refuse any other recipient. If a future edit tries to widen that, the tests fail.
+There is no delete, no trash, no spam-marking, no forwarding. Label changes (single, bulk,
+or via a filter) may only add ordinary labels and remove INBOX/UNREAD, never add TRASH or
+SPAM. Filters may only label and skip the inbox; a forwarding filter is refused. The only
+sending allowed is a note to the mailbox owner's own address (send_to_self /
+send_draft_to_self), and both refuse any other recipient. If a future edit tries to widen
+any of that, the tests fail.
 """
 
 from __future__ import annotations
@@ -34,6 +37,9 @@ ALLOWED = [
     ("POST", r"/labels"),                      # create a label
     ("POST", r"/threads/[\w-]+/modify"),       # add/remove labels; archive = remove INBOX
     ("POST", r"/messages/[\w-]+/modify"),
+    ("POST", r"/messages/batchModify"),       # bulk label/archive (same label rules as above)
+    ("GET", r"/settings/filters"),
+    ("POST", r"/settings/filters"),           # ONLY label + skip-inbox filters; enforced in _call
     ("POST", r"/drafts"),                      # create a draft (never sent)
     ("GET", r"/drafts"),
     ("GET", r"/drafts/[\w-]+"),
@@ -48,6 +54,29 @@ class Forbidden(RuntimeError):
 
 def is_allowed(method: str, path: str) -> bool:
     return any(method == m and re.fullmatch(p, path) for m, p in ALLOWED)
+
+
+NEVER_ADD = {"TRASH", "SPAM"}
+MAY_REMOVE = {"INBOX", "UNREAD", "IMPORTANT"}   # plus user labels (ids start with "Label_")
+
+
+def check_label_change(add, remove):
+    """The one rule for every label change: never trash/spam; only un-inbox, un-unread, or drop a user label."""
+    bad_add = [l for l in (add or []) if l.upper() in NEVER_ADD]
+    bad_rm = [l for l in (remove or []) if l not in MAY_REMOVE and not l.startswith("Label_")]
+    if bad_add or bad_rm:
+        raise Forbidden(f"mailroom never adds {bad_add or ''} / removes {bad_rm or ''}")
+
+
+def check_filter(body):
+    """Filters may only add a label and/or remove INBOX/UNREAD. No forwarding, no trash, no spam."""
+    action = (body or {}).get("action") or {}
+    extra = set(action) - {"addLabelIds", "removeLabelIds"}
+    if extra:
+        raise Forbidden(f"mailroom filters cannot {sorted(extra)} (only label + skip inbox)")
+    check_label_change(action.get("addLabelIds"), action.get("removeLabelIds"))
+    if not (body or {}).get("criteria"):
+        raise Forbidden("a filter needs criteria")
 
 
 @dataclass
@@ -92,6 +121,10 @@ class Gmail:
         if method == "POST" and path == "/drafts/send":
             if (json or {}).get("id") not in self._drafts_verified_mine:
                 raise Forbidden("mailroom only sends drafts it has checked are addressed to the owner")
+        if method == "POST" and (path.endswith("/modify") or path == "/messages/batchModify"):
+            check_label_change((json or {}).get("addLabelIds"), (json or {}).get("removeLabelIds"))
+        if method == "POST" and path == "/settings/filters":
+            check_filter(json)
         for attempt in range(4):
             tok = access_token(self.creds, self.email, self.session)
             r = self.session.request(method, API + path, params=params, json=json,
@@ -102,7 +135,7 @@ class Gmail:
                 continue
             if r.status_code >= 400:
                 raise RuntimeError(f"Gmail error {r.status_code} on {path}: {r.text[:300]}")
-            return r.json()
+            return r.json() if r.text.strip() else {}   # batchModify answers 204 with no body
         raise RuntimeError("Gmail kept failing; try again later.")
 
     # ---- reading ----
@@ -124,6 +157,19 @@ class Gmail:
                        **({} if body else {"metadataHeaders": ["From", "To", "Cc", "Subject", "Date", "Message-ID",
                                                                 "List-Unsubscribe", "List-Unsubscribe-Post"]})})
         return parse_message(d)
+
+    def list_ids(self, query: str, max_results: int = 20000) -> list[str]:
+        """Message ids matching a Gmail query (cheap: no headers fetched)."""
+        ids: list[str] = []
+        page = None
+        while len(ids) < max_results:
+            d = self._call("GET", "/messages", params={"q": query, "maxResults": 500,
+                                                       **({"pageToken": page} if page else {})})
+            ids += [m["id"] for m in d.get("messages", [])]
+            page = d.get("nextPageToken")
+            if not page:
+                break
+        return ids[:max_results]
 
     def get_thread(self, thread_id: str) -> list[Message]:
         d = self._call("GET", f"/threads/{thread_id}", params={"format": "full"})
@@ -156,6 +202,38 @@ class Gmail:
 
     def label(self, thread_id: str, name: str):
         return self.modify_thread(thread_id, add=[self.ensure_label(name)])
+
+    def batch_modify(self, message_ids: list[str], add: list[str] = (), remove: list[str] = ()) -> int:
+        """Label/archive many messages at once (1000 per request). Returns how many were touched."""
+        n = 0
+        for i in range(0, len(message_ids), 1000):
+            chunk = message_ids[i:i + 1000]
+            self._call("POST", "/messages/batchModify",
+                       json={"ids": chunk, "addLabelIds": list(add), "removeLabelIds": list(remove)})
+            n += len(chunk)
+        return n
+
+    def archive_query(self, query: str) -> int:
+        """Archive every message matching `query` (still in All Mail, still searchable)."""
+        return self.batch_modify(self.list_ids(query), remove=["INBOX"])
+
+    # ---- filters: label and/or skip the inbox, nothing else ----
+    def list_filters(self) -> list[dict]:
+        return self._call("GET", "/settings/filters").get("filter", [])
+
+    def create_filter(self, from_addr: str, label_name: str | None = None, skip_inbox: bool = True,
+                      mark_read: bool = False) -> str:
+        add = [self.ensure_label(label_name)] if label_name else []
+        remove = (["INBOX"] if skip_inbox else []) + (["UNREAD"] if mark_read else [])
+        if not add and not remove:
+            raise ValueError("a filter needs a label or skip-inbox")
+        for f in self.list_filters():   # don't create the same filter twice
+            if f.get("criteria", {}).get("from", "").lower() == from_addr.lower() and \
+               set(f.get("action", {}).get("addLabelIds", [])) == set(add) and \
+               set(f.get("action", {}).get("removeLabelIds", [])) == set(remove):
+                return f["id"]
+        body = {"criteria": {"from": from_addr}, "action": {"addLabelIds": add, "removeLabelIds": remove}}
+        return self._call("POST", "/settings/filters", json=body)["id"]
 
     # ---- drafts (never sent) ----
     def create_draft(self, to: str, subject: str, body: str, reply_to: Message | None = None) -> str:

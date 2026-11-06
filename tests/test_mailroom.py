@@ -15,8 +15,8 @@ def b64(s): return base64.urlsafe_b64encode(s.encode() if isinstance(s, str) els
 @pytest.mark.parametrize("method,path", [
     ("DELETE", "/messages/abc"),
     ("POST", "/messages/abc/trash"), ("POST", "/threads/abc/trash"), ("DELETE", "/threads/abc"),
-    ("POST", "/messages/batchDelete"), ("PUT", "/settings/autoForwarding"), ("POST", "/settings/filters"),
-    ("POST", "/messages/import"), ("POST", "/messages"),
+    ("POST", "/messages/batchDelete"), ("PUT", "/settings/autoForwarding"), ("POST", "/settings/forwardingAddresses"),
+    ("DELETE", "/settings/filters/abc"), ("POST", "/messages/import"), ("POST", "/messages"),
 ])
 def test_dangerous_calls_refused(method, path):
     assert not is_allowed(method, path)
@@ -98,16 +98,16 @@ def test_parse_multipart_with_pdf():
 
 def test_html_only_body_becomes_text():
     d = {"id": "M2", "payload": {"mimeType": "text/html", "headers": [],
-         "body": {"data": b64("<div>Hi<br>Sam</div><style>x{}</style><p>Meeting &amp; notes</p>")}}}
-    assert parse_message(d).body == "Hi\nSam\nMeeting & notes"
+         "body": {"data": b64("<div>Hi<br>Travis</div><style>x{}</style><p>Meeting &amp; notes</p>")}}}
+    assert parse_message(d).body == "Hi\nTravis\nMeeting & notes"
 
 
 # ---------- keys ----------
 def test_cloud_env_keys(monkeypatch):
     monkeypatch.setenv("MAILROOM_CREDENTIALS", json.dumps(
-        {"client_id": "c", "client_secret": "s", "tokens": {"Sam@Example.org": "r"}}))
+        {"client_id": "c", "client_secret": "s", "tokens": {"Travis@Capacity.church": "r"}}))
     c = load_credentials()
-    assert c.source == "env" and c.tokens == {"sam@example.org": "r"}
+    assert c.source == "env" and c.tokens == {"travis@capacity.church": "r"}
 
 
 def test_revoked_key_gives_plain_message():
@@ -157,8 +157,8 @@ def test_parse_list_unsubscribe_header():
 
 
 def test_keep_list_matches_name_or_address():
-    s = ListSender(email="news@example-author.com", name="Example Author")
-    assert is_kept(s, ["example author"]) and is_kept(s, ["Example-Author.com"]) and not is_kept(s, ["Other School"])
+    s = ListSender(email="news@dhariusdaniels.com", name="Dharius Daniels")
+    assert is_kept(s, ["dharius daniels"]) and is_kept(s, ["DhariusDaniels.com"]) and not is_kept(s, ["Lipscomb"])
 
 
 def test_scan_groups_by_sender_and_skips_mail_without_header():
@@ -219,7 +219,7 @@ def test_send_draft_refuses_other_recipients():
 
 
 def test_send_draft_to_self_only():
-    s = DraftSession("Sam <me@x.com>"); g = Gmail(creds(), "me@x.com", s)
+    s = DraftSession("Travis <me@x.com>"); g = Gmail(creds(), "me@x.com", s)
     assert g.send_draft_to_self("D1") == "sent1"
     assert s.calls[-1][0:2] == ("POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send")
 
@@ -230,3 +230,49 @@ def test_assert_only_me_blocks_everyone_else():
         g._assert_only_me(["me@x.com", "friend@y.com"])
     with pytest.raises(Forbidden):
         g._assert_only_me([])
+
+
+# ---------- bulk changes and filters: label + archive only ----------
+def test_bulk_modify_never_trashes_or_spams():
+    g = Gmail(creds(), "me@x.com", FakeSession())
+    for bad in ({"addLabelIds": ["TRASH"]}, {"addLabelIds": ["SPAM"]}, {"removeLabelIds": ["STARRED"]}):
+        with pytest.raises(Forbidden):
+            g._call("POST", "/messages/batchModify", json={"ids": ["a"], **bad})
+        with pytest.raises(Forbidden):
+            g._call("POST", "/threads/t1/modify", json=bad)
+    g._call("POST", "/messages/batchModify", json={"ids": ["a"], "addLabelIds": ["Label_5"], "removeLabelIds": ["INBOX", "UNREAD"]})
+
+
+def test_filters_only_label_and_skip_inbox():
+    g = Gmail(creds(), "me@x.com", FakeSession())
+    ok = {"criteria": {"from": "news@example.com"}, "action": {"addLabelIds": ["Label_1"], "removeLabelIds": ["INBOX"]}}
+    g._call("POST", "/settings/filters", json=ok)
+    for bad in (
+        {"criteria": {"from": "a@b"}, "action": {"forward": "thief@evil.com"}},
+        {"criteria": {"from": "a@b"}, "action": {"addLabelIds": ["TRASH"]}},
+        {"criteria": {"from": "a@b"}, "action": {"addLabelIds": ["SPAM"]}},
+        {"action": {"removeLabelIds": ["INBOX"]}},
+    ):
+        with pytest.raises(Forbidden):
+            g._call("POST", "/settings/filters", json=bad)
+
+
+def test_archive_query_batches_by_1000():
+    class S(FakeSession):
+        def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+            self.calls.append((method, url, params, json))
+            if method == "GET" and url.endswith("/messages"):
+                return FakeResp({"messages": [{"id": str(i)} for i in range(1500)]})
+            return FakeResp({})
+    s = S(); g = Gmail(creds(), "me@x.com", s)
+    assert g.archive_query("in:inbox older_than:1m") == 1500
+    mods = [c for c in s.calls if c[1].endswith("/messages/batchModify")]
+    assert [len(c[3]["ids"]) for c in mods] == [1000, 500]
+    assert all(c[3]["removeLabelIds"] == ["INBOX"] and c[3]["addLabelIds"] == [] for c in mods)
+
+
+def test_empty_body_is_ok():
+    class S(FakeSession):
+        def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+            r = FakeResp({}, 204); r.text = ""; return r
+    assert Gmail(creds(), "me@x.com", S())._call("POST", "/messages/batchModify", json={"ids": ["a"], "removeLabelIds": ["INBOX"]}) == {}

@@ -1,11 +1,11 @@
 """mailroom: Bri's hands in your inboxes.
 
     mailroom accounts                         which inboxes are connected
-    mailroom login <account>|all          sign in once per inbox (opens a browser)
-    mailroom search "query" [-a work] [-n 20]
+    mailroom login church|personal|chavis|all sign in once per inbox (opens a browser)
+    mailroom search "query" [-a church] [-n 20]
     mailroom read  <account> <message-or-thread-id> [--thread]
     mailroom pdf   <account> <message-id> [--save DIR]
-    mailroom label <account> <thread-id>... --name "Follow up"
+    mailroom label <account> <thread-id>... --name "Church Closing"
     mailroom archive <account> <thread-id>...
     mailroom draft <account> --to ADDR --subject S (--body TEXT | --body-file F) [--reply-to MSG-ID]
     mailroom export-env                       write the cloud key line to .secrets/cloud-env.txt
@@ -13,8 +13,14 @@
                                               list mailing-list senders; --go unsubscribes via their own links
     mailroom send-self <account> --subject S (--body TEXT | --body-file F)   email yourself (nobody else)
     mailroom send-self <account> --draft ID   send a draft that is addressed only to you
+    mailroom archive-all <account> [--older-than 1m] [--query Q] [--go]
+                                              bulk-archive the inbox (dry run unless --go)
+    mailroom filter <account> --from ADDR --label NAME [--keep-in-inbox] [--apply]
+                                              new mail from ADDR gets the label and skips the inbox;
+                                              --apply also files what's already there
 
-It never deletes, and the only address it can send to is the mailbox's own. `search` uses normal Gmail search words
+It never deletes, and the only address it can send to is the mailbox's own. Filters can only label
+and skip the inbox (never forward or trash). `search` uses normal Gmail search words
 (from:, subject:, has:attachment, filename:pdf, after:2026/10/01, in:anywhere, ...).
 """
 
@@ -163,7 +169,7 @@ def cmd_draft(a):
     if not to:
         sys.exit("Need --to (or --reply-to).")
     did = g.create_draft(to, a.subject or (("Re: " + reply.subject) if reply else "(no subject)"), body, reply)
-    print(f"Draft saved in {g.email} (id {did}). Not sent. The account owner reviews and sends it.")
+    print(f"Draft saved in {g.email} (id {did}). Not sent. Travis reviews and sends it himself.")
 
 
 def cmd_export_env(_):
@@ -233,6 +239,29 @@ def cmd_send_self(a):
     print(f"Emailed {g.email}: \"{a.subject}\" (message {mid}).")
 
 
+def cmd_archive_all(a):
+    g = Gmail(load_credentials(), resolve(a.account)[0])
+    q = a.query or ("in:inbox" + (f" older_than:{a.older_than}" if a.older_than else ""))
+    ids = g.list_ids(q)
+    if not a.go:
+        print(f"[{alias(g.email)}] {len(ids)} message(s) match \"{q}\". Dry run; add --go to archive them. "
+              "(Archived mail stays in All Mail and stays searchable. Nothing is deleted.)")
+        return
+    n = g.batch_modify(ids, remove=["INBOX"])
+    print(f"[{alias(g.email)}] Archived {n} message(s) matching \"{q}\". Still searchable; not deleted.")
+
+
+def cmd_filter(a):
+    g = Gmail(load_credentials(), resolve(a.account)[0])
+    fid = g.create_filter(a.from_addr, a.label, skip_inbox=not a.keep_in_inbox)
+    where = "label '" + a.label + "'" + ("" if a.keep_in_inbox else ", skipping the inbox")
+    print(f"[{alias(g.email)}] Filter {fid}: mail from {a.from_addr} -> {where}.")
+    if a.apply:
+        ids = g.list_ids(f"from:{a.from_addr}")
+        n = g.batch_modify(ids, add=[g.ensure_label(a.label)], remove=[] if a.keep_in_inbox else ["INBOX"])
+        print(f"  Filed {n} existing message(s) the same way.")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mailroom", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -262,6 +291,15 @@ def main(argv=None):
     s.add_argument("account"); s.add_argument("--subject"); s.add_argument("--body"); s.add_argument("--body-file")
     s.add_argument("--draft", help="send an existing draft that is addressed only to yourself")
     s.add_argument("--list-drafts", action="store_true"); s.set_defaults(fn=cmd_send_self)
+    s = sub.add_parser("archive-all", help="bulk-archive the inbox (dry run unless --go)")
+    s.add_argument("account"); s.add_argument("--older-than", help="e.g. 1m, 30d, 1y (Gmail syntax)")
+    s.add_argument("--query", help="a full Gmail query instead of in:inbox")
+    s.add_argument("--go", action="store_true"); s.set_defaults(fn=cmd_archive_all)
+    s = sub.add_parser("filter", help="label (and skip inbox for) mail from a sender")
+    s.add_argument("account"); s.add_argument("--from", dest="from_addr", required=True)
+    s.add_argument("--label", required=True); s.add_argument("--keep-in-inbox", action="store_true")
+    s.add_argument("--apply", action="store_true", help="also file mail already in the mailbox")
+    s.set_defaults(fn=cmd_filter)
     a = p.parse_args(argv)
     try:
         a.fn(a)
