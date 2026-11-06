@@ -151,7 +151,7 @@ def test_parse_list_unsubscribe_header():
 
 def test_keep_list_matches_name_or_address():
     s = ListSender(email="news@example-author.com", name="Example Author")
-    assert is_kept(s, ["example author"]) and is_kept(s, ["Example-Author.com"]) and not is_kept(s, ["Lipscomb"])
+    assert is_kept(s, ["example author"]) and is_kept(s, ["Example-Author.com"]) and not is_kept(s, ["Other School"])
 
 
 def test_scan_groups_by_sender_and_skips_mail_without_header():
