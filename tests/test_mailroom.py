@@ -219,7 +219,7 @@ def test_send_draft_refuses_other_recipients():
 
 
 def test_send_draft_to_self_only():
-    s = DraftSession("Travis <me@x.com>"); g = Gmail(creds(), "me@x.com", s)
+    s = DraftSession("Sam <me@x.com>"); g = Gmail(creds(), "me@x.com", s)
     assert g.send_draft_to_self("D1") == "sent1"
     assert s.calls[-1][0:2] == ("POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send")
 
