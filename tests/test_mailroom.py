@@ -276,3 +276,17 @@ def test_empty_body_is_ok():
         def request(self, method, url, params=None, json=None, headers=None, timeout=None):
             r = FakeResp({}, 204); r.text = ""; return r
     assert Gmail(creds(), "me@x.com", S())._call("POST", "/messages/batchModify", json={"ids": ["a"], "removeLabelIds": ["INBOX"]}) == {}
+
+
+def test_amount_in():
+    from mailroom.gmail import amount_in
+    assert amount_in("Your receipt for $1,234.56 from Costco") == "$1,234.56"
+    assert amount_in("Total: $ 49.99") == "$49.99"
+    assert amount_in("Order #12345 shipped") == ""
+
+
+def test_store_of():
+    from mailroom.gmail import store_of
+    assert store_of("Amazon.com <auto-confirm@amazon.com>") == "Amazon"
+    assert store_of("Old Navy <oldnavy@email.oldnavy.com>") == "Old Navy"
+    assert store_of("Costco <no-reply@costco.com>") == ""

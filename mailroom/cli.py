@@ -13,6 +13,9 @@
                                               list mailing-list senders; --go unsubscribes via their own links
     mailroom send-self <account> --subject S (--body TEXT | --body-file F)   email yourself (nobody else)
     mailroom send-self <account> --draft ID   send a draft that is addressed only to you
+    mailroom receipts [<account>|all] [--days 30] [--store Walmart] [--find "$49.99"] [--backfill]
+                                              receipts grouped by store with totals; --backfill labels
+                                              older receipts it can recognise
     mailroom archive-all <account> [--older-than 1m] [--query Q] [--go]
                                               bulk-archive the inbox (dry run unless --go)
     mailroom filter <account> --from ADDR --label NAME [--keep-in-inbox] [--apply]
@@ -33,7 +36,7 @@ import sys
 from pathlib import Path
 
 from .auth import AuthError, interactive_login, load_credentials, project_root, save_token, secrets_dir
-from .gmail import Gmail, Message
+from .gmail import RECEIPT_QUERY, STORES, Gmail, Message, amount_in, store_of
 from .pdf import pdf_text
 
 
@@ -239,6 +242,38 @@ def cmd_send_self(a):
     print(f"Emailed {g.email}: \"{a.subject}\" (message {mid}).")
 
 
+def cmd_receipts(a):
+    creds = load_credentials()
+    rows: dict[str, list] = {}
+    for acct in resolve(a.account):
+        g = Gmail(creds, acct)
+        if a.backfill:
+            n = g.batch_modify(g.list_ids(f"{RECEIPT_QUERY} -label:receipts"), add=[g.ensure_label("Receipts")])
+            print(f"[{alias(acct)}] labeled {n} older receipt(s) 'Receipts'.")
+            for store, domains in STORES.items():
+                lid = g.ensure_label(f"Receipts/{store}")
+                q = "label:receipts (" + " OR ".join(f"from:{d}" for d in domains) + f") -label:receipts-{store.lower().replace(' ', '-')}"
+                k = g.batch_modify(g.list_ids(q), add=[lid])
+                if k:
+                    print(f"[{alias(acct)}]   {store}: {k} labeled 'Receipts/{store}'.")
+        q = f"label:receipts newer_than:{a.days}d" + (f" {a.find}" if a.find else "")
+        if a.store:
+            q += f" label:receipts-{a.store.lower().replace(' ', '-')}"
+        for m in g.search(q, a.max):
+            rows.setdefault(store_of(m.sender) or "Other", []).append((acct, m))
+    total = 0
+    for store in [*STORES, "Other"]:
+        if store not in rows:
+            continue
+        amts = [amount_in(m.subject + " " + m.snippet) for _, m in rows[store]]
+        known = sum(float(x[1:].replace(",", "")) for x in amts if x)
+        print(f"\n== {store}: {len(rows[store])} receipt(s), about ${known:,.2f} ==")
+        for (acct, m), amt in zip(rows[store], amts):
+            print(f"[{alias(acct)}] {m.date[5:16]:12} {amt:>10}  {m.sender[:30]:30}  {m.subject[:58]}  ({m.id})")
+        total += len(rows[store])
+    print(f"\n{total} receipt(s). In Gmail: label:receipts, or label:receipts-walmart, label:receipts-amazon, ...")
+
+
 def cmd_archive_all(a):
     g = Gmail(load_credentials(), resolve(a.account)[0])
     q = a.query or ("in:inbox" + (f" older_than:{a.older_than}" if a.older_than else ""))
@@ -291,6 +326,13 @@ def main(argv=None):
     s.add_argument("account"); s.add_argument("--subject"); s.add_argument("--body"); s.add_argument("--body-file")
     s.add_argument("--draft", help="send an existing draft that is addressed only to yourself")
     s.add_argument("--list-drafts", action="store_true"); s.set_defaults(fn=cmd_send_self)
+    s = sub.add_parser("receipts", help="list receipts (label:Receipts), with amounts")
+    s.add_argument("account", nargs="?", default="all"); s.add_argument("--days", type=int, default=30)
+    s.add_argument("--find", help="extra Gmail search words, e.g. \"$49.99\"")
+    s.add_argument("--store", help="Walmart, Amazon, \"Old Navy\", Nike")
+    s.add_argument("-n", "--max", type=int, default=100)
+    s.add_argument("--backfill", action="store_true", help="label older receipts it can recognise")
+    s.set_defaults(fn=cmd_receipts)
     s = sub.add_parser("archive-all", help="bulk-archive the inbox (dry run unless --go)")
     s.add_argument("account"); s.add_argument("--older-than", help="e.g. 1m, 30d, 1y (Gmail syntax)")
     s.add_argument("--query", help="a full Gmail query instead of in:inbox")

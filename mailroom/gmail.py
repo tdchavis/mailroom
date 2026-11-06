@@ -348,5 +348,35 @@ def recipients_of_raw(raw_b64: str) -> list[str]:
     return [a for _, a in getaddresses([h for h in (msg.get("To"), msg.get("Cc"), msg.get("Bcc")) if h]) if a]
 
 
+RECEIPT_QUERY = ('subject:(receipt OR "order confirmation" OR "payment confirmation" OR "payment received" OR invoice OR '
+                 '"your order" OR "thanks for your order" OR "thank you for your purchase" OR "your purchase" OR '
+                 '"payment successful" OR "you paid" OR "order placed" OR "e-receipt")')
+
+# Stores that get their own sub-label under Receipts. Travis: add a line to add a store.
+STORES = {
+    "Walmart": ["walmart.com"],
+    "Amazon": ["amazon.com"],
+    "Old Navy": ["oldnavy.com", "gap.com"],
+    "Nike": ["nike.com"],
+}
+
+
+def store_of(sender: str) -> str:
+    s = sender.lower()
+    for store, domains in STORES.items():
+        if any(d in s for d in domains):
+            return store
+    return ""
+
+
+_AMOUNT = re.compile(r"(?<![\w.])\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)")
+
+
+def amount_in(text: str) -> str:
+    """First dollar amount in a subject/snippet, e.g. '$1,234.56', or ''."""
+    m = _AMOUNT.search(text or "")
+    return "$" + m.group(1) if m else ""
+
+
 def sender_email(m: Message) -> str:
     return parseaddr(m.sender)[1].lower()
