@@ -292,6 +292,69 @@ class Gmail:
         return self._call("POST", "/drafts/send", json={"id": draft_id})["id"]
 
 
+# ---------- Google Docs: read-only, one endpoint ----------
+DOCS_API = "https://docs.googleapis.com/v1/documents/"
+
+
+def doc_id_from(ref: str) -> str:
+    """Accept a bare id or a docs.google.com URL."""
+    m = re.search(r"/document/d/([\w-]+)", ref)
+    return m.group(1) if m else ref.strip()
+
+
+def doc_to_text(doc: dict) -> str:
+    """Flatten a Docs API document into plain text (paragraphs, bullets, tables)."""
+    out: list[str] = []
+
+    def run(elements):
+        for el in elements or []:
+            if "paragraph" in el:
+                para = el["paragraph"]
+                bullet = "- " if para.get("bullet") else ""
+                text = "".join(t.get("textRun", {}).get("content", "") for t in para.get("elements", []))
+                style = para.get("paragraphStyle", {}).get("namedStyleType", "")
+                if style.startswith("HEADING_") and text.strip():
+                    level = int(style.split("_")[-1]) if style.split("_")[-1].isdigit() else 2
+                    text = "#" * level + " " + text
+                out.append(bullet + text.rstrip("\n"))
+            elif "table" in el:
+                for row in el["table"].get("tableRows", []):
+                    cells = []
+                    for c in row.get("tableCells", []):
+                        sub: list[str] = []
+                        for pel in c.get("content", []):
+                            if "paragraph" in pel:
+                                sub.append("".join(t.get("textRun", {}).get("content", "") for t in pel["paragraph"].get("elements", [])).strip())
+                        cells.append(" ".join(x for x in sub if x))
+                    out.append("| " + " | ".join(cells) + " |")
+            elif "sectionBreak" in el:
+                continue
+    run(doc.get("body", {}).get("content", []))
+    text = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
+
+
+class Docs:
+    """Read a Google Doc as text with the same account keys. Read-only by construction: the only
+    request this class can make is GET documents/{id}."""
+
+    def __init__(self, creds: Credentials, email: str, session: requests.Session | None = None):
+        self.creds, self.email, self.session = creds, email.lower(), session or requests.Session()
+
+    def text(self, ref: str) -> str:
+        did = doc_id_from(ref)
+        if not re.fullmatch(r"[\w-]+", did):
+            raise Forbidden(f"not a document id: {ref!r}")
+        tok = access_token(self.creds, self.email, self.session)
+        r = self.session.get(DOCS_API + did, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+        if r.status_code == 403 and "insufficient" in r.text.lower():
+            raise RuntimeError(f"{self.email} has no Docs permission yet. Run: mailroom login {self.email}")
+        if r.status_code >= 400:
+            raise RuntimeError(f"Docs error {r.status_code}: {r.text[:200]}")
+        d = r.json()
+        return f"# {d.get('title', '')}\n\n" + doc_to_text(d)
+
+
 # ---------- parsing helpers (pure functions; tested) ----------
 
 def b64decode(data: str) -> bytes:

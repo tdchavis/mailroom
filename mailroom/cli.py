@@ -16,6 +16,7 @@
     mailroom receipts [<account>|all] [--days 30] [--store Walmart] [--find "$49.99"] [--backfill] [--email personal]
                                               one list of every receipt in every inbox, with links;
                                               --email sends it to you; --backfill labels older receipts
+    mailroom doc <account> <google-doc-id-or-url>  print a Google Doc as text (read-only; Bri's rulebook)
     mailroom archive-all <account> [--older-than 1m] [--query Q] [--go]
                                               bulk-archive the inbox (dry run unless --go)
     mailroom filter <account> (--from ADDR | --query Q) --label NAME [--keep-in-inbox] [--apply]
@@ -36,7 +37,7 @@ import sys
 from pathlib import Path
 
 from .auth import AuthError, interactive_login, load_credentials, project_root, save_token, secrets_dir
-from .gmail import RECEIPT_QUERY, STORES, Gmail, Message, amount_in, store_of
+from .gmail import RECEIPT_QUERY, STORES, Docs, Gmail, Message, amount_in, store_of
 from .pdf import pdf_text
 
 
@@ -280,6 +281,10 @@ def cmd_receipts(a):
         print(text)
 
 
+def cmd_doc(a):
+    print(Docs(load_credentials(), resolve(a.account)[0]).text(a.doc))
+
+
 def cmd_archive_all(a):
     g = Gmail(load_credentials(), resolve(a.account)[0])
     q = a.query or ("in:inbox" + (f" older_than:{a.older_than}" if a.older_than else ""))
@@ -343,6 +348,8 @@ def main(argv=None):
     s.add_argument("--backfill", action="store_true", help="label older receipts it can recognise")
     s.add_argument("--email", metavar="ACCOUNT", help="email the index to this inbox's owner instead of printing")
     s.set_defaults(fn=cmd_receipts)
+    s = sub.add_parser("doc", help="print a Google Doc as text (read-only)")
+    s.add_argument("account"); s.add_argument("doc"); s.set_defaults(fn=cmd_doc)
     s = sub.add_parser("archive-all", help="bulk-archive the inbox (dry run unless --go)")
     s.add_argument("account"); s.add_argument("--older-than", help="e.g. 1m, 30d, 1y (Gmail syntax)")
     s.add_argument("--query", help="a full Gmail query instead of in:inbox")

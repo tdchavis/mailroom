@@ -28,7 +28,9 @@ import requests
 
 # gmail.modify = read/label/archive/draft; gmail.settings.basic = create label+skip-inbox filters.
 # (Filters need a fresh `mailroom login <acct>` for inboxes signed in before this was added.)
-SCOPE = "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.settings.basic"
+# documents.readonly = read Google Docs (Bri's rulebook lives in one). Read-only; no Drive browsing.
+SCOPE = ("https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.settings.basic "
+         "https://www.googleapis.com/auth/documents.readonly")
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 ENV_VAR = "MAILROOM_CREDENTIALS"
